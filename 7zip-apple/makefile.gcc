@@ -1,0 +1,65 @@
+# lib7zip_apple.a: the 7zz bundle (CPP/7zip/Bundles/Alone2) without its console
+# layer, plus the C API in src/. 7-Zip's rules name sources relative to the
+# bundle directory, so make runs from there:
+#
+#   make -C CPP/7zip/Bundles/Alone2 -f $PWD/7zip-apple/makefile.gcc \
+#        ARCH=arm64 O=$PWD/7zip-apple/build/arm64
+#
+# ARCH selects CPP/7zip/var_mac_<ARCH>.mak: arm64 or x64.
+#
+# Codecs register themselves from static initialisers in objects nothing
+# references, which a plain archive would let the linker drop. Everything is
+# therefore pre-linked into one object that exports only sevenzip_*, so a
+# consumer needs no -force_load and sees none of 7-Zip's own symbols.
+
+APPLE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
+ARCH ?= arm64
+include ../../var_mac_$(ARCH).mak
+include ../../warn_clang_mac.mak
+include makefile.gcc
+
+# 7-Zip (since 26.05) puts a deployment target and -march into MY_ARCH. The
+# deployment target is build.sh's MACOSX_DEPLOYMENT_TARGET here, and ld -r
+# takes the architecture alone.
+MY_ARCH := $(filter-out -mmacosx-version-min=%,$(MY_ARCH))
+LD_ARCH = $(filter -arch arm64 x86_64,$(MY_ARCH))
+
+APPLE_VERSION := $(shell cat $(APPLE_DIR)/../VERSION 2>/dev/null)
+ifeq ($(APPLE_VERSION),)
+$(error VERSION is missing)
+endif
+
+# Tentative C definitions (`T g;`) would stay common symbols, which ld -r
+# cannot hide; giving them storage keeps the export list exact.
+CFLAGS_BASE2 = -fno-common
+
+SHIM_OBJS = \
+  $O/SevenZipApple.o \
+  $O/Callbacks.o \
+  $O/Guids.o \
+
+LIB_OBJS = $(filter-out $(CONSOLE_OBJS),$(OBJS)) $(SHIM_OBJS)
+LIB = $(O)/lib7zip_apple.a
+PRELINKED = $(O)/7zip_apple.o
+
+SHIM_FLAGS = $(CXXFLAGS) -std=c++17 -Wno-everything -Wall -Wextra -Werror \
+  -I$(APPLE_DIR)/include -DSEVENZIP_APPLE_VERSION='"$(APPLE_VERSION)"'
+
+.DEFAULT_GOAL := lib
+
+lib: $(LIB)
+
+$(LIB): $(LIB_OBJS) $(APPLE_DIR)/exports.txt
+	$(RM) $@ $(PRELINKED)
+	ld -r $(LD_ARCH) -exported_symbols_list $(APPLE_DIR)/exports.txt -o $(PRELINKED) $(LIB_OBJS)
+	libtool -static -o $@ $(PRELINKED)
+
+$(SHIM_OBJS): | $(O)
+
+$O/SevenZipApple.o: $(APPLE_DIR)/src/SevenZipApple.cpp $(APPLE_DIR)/src/Callbacks.h $(APPLE_DIR)/include/7zip_apple.h $(APPLE_DIR)/../VERSION
+	$(CXX) $(SHIM_FLAGS) $<
+$O/Callbacks.o: $(APPLE_DIR)/src/Callbacks.cpp $(APPLE_DIR)/src/Callbacks.h $(APPLE_DIR)/include/7zip_apple.h
+	$(CXX) $(SHIM_FLAGS) $<
+$O/Guids.o: $(APPLE_DIR)/src/Guids.cpp
+	$(CXX) $(SHIM_FLAGS) $<

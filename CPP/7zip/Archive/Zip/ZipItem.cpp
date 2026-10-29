@@ -1,4 +1,7 @@
 // Archive/ZipItem.cpp
+// Changed by ARAS-Workspace (https://github.com/ARAS-Workspace/7zip-lib) from 7-Zip 26.05:
+//   2026-10-13: On Apple systems, a name stored in a Windows code page is read with the
+//               code page the library was given for it (CodePageToUnicodeString).
 
 #include "StdAfx.h"
 
@@ -458,6 +461,16 @@ void CItem::GetUnicodeString(UString &res, const AString &s, bool isComment, boo
     return;
   }
   
+  #ifdef __APPLE__
+  /* macOS has no OEM or ANSI code page: a name stored in one is read with the
+     code page the library was given for it. A name that is valid UTF-8 stays
+     UTF-8 unless a code page was specified, as archives made on Unix without
+     the UTF-8 flag hold such names. */
+  if ((useSpecifiedCodePage || !CheckUTF8_AString(s))
+      && CodePageToUnicodeString(res, s, useSpecifiedCodePage ? codePage : GetCodePage()))
+    return;
+  #endif
+
   MultiByteToUnicodeString2(res, s, useSpecifiedCodePage ? codePage : GetCodePage());
 }
 
