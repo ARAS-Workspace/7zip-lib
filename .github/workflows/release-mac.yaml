@@ -1,0 +1,83 @@
+name: Release macOS
+
+# Tag-triggered release of the universal macOS static library.
+# Triggered by `.github/scripts/release-mac.sh`, which reads the version
+# from VERSION and pushes a `mac-v<version>` tag.
+
+on:
+  push:
+    tags: [ "mac-v*" ]
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+  LIB_NAME: "lib7zip_apple.a"
+  HEADER: "7zip_apple.h"
+
+jobs:
+  release:
+    name: Build universal + test + publish release
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve version from tag and verify it matches VERSION and 7-Zip
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#mac-v}"
+          FILE="$(tr -d '[:space:]' < VERSION)"
+          if [ "$VERSION" != "$FILE" ]; then
+            echo "ERROR: tag says '${VERSION}', VERSION says '${FILE}'" >&2
+            exit 1
+          fi
+          UPSTREAM="$(sed -n 's/^#define MY_VERSION_NUMBERS "\(.*\)"$/\1/p' C/7zVersion.h)"
+          if [ "${VERSION%%+*}" != "$UPSTREAM" ]; then
+            echo "ERROR: tag says '${VERSION}', C/7zVersion.h says '${UPSTREAM}'" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "upstream=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build arm64 + x86_64 and run the round-trip test
+        run: 7zip-apple/build.sh
+
+      - name: Package archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage/include release
+          cp "7zip-apple/build/universal/${LIB_NAME}" stage/
+          cp "7zip-apple/include/${HEADER}" stage/include/
+          cp DOC/License.txt stage/LICENSE
+          # The full GNU LGPL 2.1 that LICENSE refers to goes with the library (LGPL 2.1 section 1)
+          cp DOC/copying.txt stage/copying.txt
+          (cd stage && shasum -a 256 "${LIB_NAME}" LICENSE copying.txt > CHECKSUM.sha256)
+          tar -czf "release/7zip-apple_${VERSION}_macos_universal.tar.gz" -C stage .
+          (cd release && shasum -a 256 ./*.tar.gz > checksums.txt)
+          ls -lh release/
+          cat release/checksums.txt
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          UPSTREAM: ${{ steps.version.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "7zip-apple macOS ${VERSION}" \
+              --notes "Universal (arm64 + x86_64) macOS static library and C header, built from 7-Zip ${UPSTREAM}."
+          fi
