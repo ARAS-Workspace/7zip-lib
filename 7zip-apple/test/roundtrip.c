@@ -9,7 +9,10 @@
 
 #include "7zip_apple.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,6 +155,80 @@ static void write_windows_zip(const char *name, const char *const *names, const 
 /* A tar written by hand: an entry for each name, a folder when it ends in
    "/", a file holding "x" otherwise; names such as "./a.txt" or "/abs.txt"
    stay as given, as tar -C dir . and other tools write them. */
+/* A gzip stream of the file `name` that names what it packs `inner` (FNAME, RFC 1952), stored uncompressed. */
+static void write_gzip_named(const char *gz, const char *name, const char *inner)
+{
+    size_t size = 0;
+    char *data = read_file(name, &size);
+    static unsigned char out[70000];
+    unsigned char *p = out;
+    const unsigned char head[] = { 0x1f, 0x8b, 8, 0x08, 0, 0, 0, 0, 0, 3 };
+    memcpy(p, head, sizeof head); p += sizeof head;
+    memcpy(p, inner, strlen(inner) + 1); p += strlen(inner) + 1;
+    *p++ = 1;
+    put16(&p, size); put16(&p, ~size & 0xFFFF);
+    memcpy(p, data, size); p += size;
+    put32(&p, crc32_of(data, size)); put32(&p, size);
+    write_file(gz, (const char *)out, (size_t)(p - out));
+    free(data);
+}
+
+
+/* The bytes a compressed tar has unpacked to so far, in its scratch folders in TMPDIR. */
+static uint64_t scratch_bytes(void)
+{
+    uint64_t bytes = 0;
+    const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
+    DIR *d = opendir(tmp);
+    if (!d) return 0;
+    for (struct dirent *e; (e = readdir(d)); ) {
+        if (strncmp(e->d_name, "7zip-apple-", 11) != 0 || strncmp(e->d_name, "7zip-apple-test-", 16) == 0) continue;
+        char folder[1024];
+        snprintf(folder, sizeof folder, "%s/%s", tmp, e->d_name);
+        DIR *inner = opendir(folder);
+        if (!inner) continue;
+        for (struct dirent *f; (f = readdir(inner)); ) {
+            char file[2048];
+            struct stat st;
+            snprintf(file, sizeof file, "%s/%s", folder, f->d_name);
+            if (lstat(file, &st) == 0 && S_ISREG(st.st_mode)) bytes += (uint64_t)st.st_size;
+        }
+        closedir(inner);
+    }
+    closedir(d);
+    return bytes;
+}
+
+/* The most a compressed tar's scratch folder held at any progress report. */
+static bool record_furthest(void *context, uint64_t completed, uint64_t total)
+{
+    (void)completed; (void)total;
+    uint64_t *most = context;
+    const uint64_t now = scratch_bytes();
+    if (now > *most) *most = now;
+    return false;
+}
+
+/* The scratch folders a compressed tar unpacked into and left in TMPDIR. */
+static int scratch_left(void)
+{
+    int left = 0;
+    DIR *d = opendir(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    if (!d) return 0;
+    for (struct dirent *e; (e = readdir(d)); )
+        if (strncmp(e->d_name, "7zip-apple-", 11) == 0 && strncmp(e->d_name, "7zip-apple-test-", 16) != 0)
+            left++;
+    closedir(d);
+    return left;
+}
+
+static int remove_entry(const char *entry, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)st; (void)flag; (void)ftw;
+    chmod(entry, 0755);
+    return remove(entry);
+}
+
 static void write_tar(const char *name, const char *const *names, int count)
 {
     static char tar[16384];
@@ -446,6 +523,62 @@ int main(void)
         CHECK(!exists("outmissing/a.txt"), "a missing name extracted everything\n");
     }
 
+    // A compressed tar is the tar it unpacks to, never the name its stream gives: "../trap.tar" opened the tar of
+    // that name beside the scratch folder
+    {
+        const char *trapped[] = { "trap-entry.txt" };
+        write_tar("trap.tar", trapped, 1);
+        char trap[1024];
+        snprintf(trap, sizeof trap, "%s/trap.tar", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+        rename(path("trap.tar"), trap);
+        const char *inner[] = { "inner.txt" };
+        write_tar("inner.tar", inner, 1);
+        write_gzip_named("named.tar.gz", "inner.tar", "../trap.tar");
+        SevenZipListing *listing = NULL;
+        EXPECT(listed("named.tar.gz", NULL, NULL, &listing), SEVENZIP_OK);
+        CHECK(has_item(listing, "inner.txt") && !has_item(listing, "trap-entry.txt"), "the stream's name opened another tar\n");
+        sevenzip_listing_free(listing);
+        unlink(trap);
+    }
+
+    // A compressed tar unpacks to at most the scratch limit: past it the call stops with its own error and leaves no
+    // scratch folder; 0 brings back the default, the free space less a margin
+    {
+        sevenzip_set_scratch_limit(64 * 1024);
+        EXPECT(listed("pack.tar.gz", NULL, NULL, NULL), SEVENZIP_ERR_NO_SPACE);
+        make_dir("outlimit");
+        EXPECT(sevenzip_extract(path("pack.tar.gz"), path("outlimit"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL),
+               SEVENZIP_ERR_NO_SPACE);
+        CHECK(scratch_left() == 0, "a scratch folder was left\n");
+
+        // A bomb is stopped while it unpacks, not once it has: 256 MiB of zeros in a gzip of a few hundred KiB
+        make_dir("bomb");
+        int fd = open(path("bomb/zeros.bin"), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        CHECK(fd >= 0 && ftruncate(fd, 256 << 20) == 0, "bomb/zeros.bin was not made\n");
+        close(fd);
+        char *zerosPath = strdup(path("bomb/zeros.bin"));
+        const char *zeros[] = { zerosPath };
+        SevenZipCreateOptions tar = options("tar");
+        tar.level = -1;
+        EXPECT(sevenzip_create(path("bomb.tar"), zeros, 1, &tar, NULL), SEVENZIP_OK);
+        free(zerosPath);
+        unlink(path("bomb/zeros.bin"));
+        SevenZipCreateOptions gz = options("gzip");
+        gz.level = 1;
+        const char *bombTar[] = { path("bomb.tar") };
+        EXPECT(sevenzip_create(path("bomb.tar.gz"), bombTar, 1, &gz, NULL), SEVENZIP_OK);
+        unlink(path("bomb.tar"));
+        sevenzip_set_scratch_limit(4 << 20);
+        uint64_t most = 0;
+        SevenZipCallbacks watch = { &most, record_furthest, NULL, NULL };
+        EXPECT(sevenzip_test(path("bomb.tar.gz"), NULL, &watch), SEVENZIP_ERR_NO_SPACE);
+        printf("the bomb stopped at %.1f MiB of 256\n", (double)most / 1048576.0);
+        CHECK(most > 0 && most < (32u << 20), "the bomb unpacked to %llu bytes before it was stopped\n", (unsigned long long)most);
+        CHECK(scratch_left() == 0, "the bomb's scratch folder was left\n");
+        sevenzip_set_scratch_limit(0);
+        EXPECT(listed("pack.tar.gz", NULL, NULL, NULL), SEVENZIP_OK);
+    }
+
     // Failures
     EXPECT(listed("src/a.txt", NULL, NULL, NULL), SEVENZIP_ERR_NOT_ARCHIVE);
     {
@@ -457,6 +590,8 @@ int main(void)
     EXPECT(sevenzip_extract(NULL, NULL, NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_ERR_INVALID_PARAM);
 
     free(noise);
+    // The workspace goes, as the scratch folders do: test after test it was left in TMPDIR
+    nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
     if (failures == 0)
         printf("all checks passed\n");
     else

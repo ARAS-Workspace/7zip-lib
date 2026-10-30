@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <dirent.h>
 #include <ftw.h>
 #include <new>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <vector>
 
@@ -85,6 +87,8 @@ static int32_t Guarded(Body body)
 static int32_t Resolve(HRESULT hr, const COutcome &outcome, bool passwordGiven, const std::string &fallback)
 {
     const std::string &message = outcome.FirstError.empty() ? fallback : outcome.FirstError;
+    if (outcome.NoSpace)
+        return Fail(SEVENZIP_ERR_NO_SPACE, "The compressed tar would unpack to more than the space allowed for it");
     if (outcome.Cancelled)
         return Fail(SEVENZIP_ERR_CANCELLED, "Cancelled");
     if (outcome.PasswordRequested && !passwordGiven)
@@ -263,7 +267,6 @@ public:
 
 struct CNestedTar
 {
-    UString Inner;       // the tar's name inside the stream
     std::string Outer;   // the stream's format name
 };
 
@@ -310,23 +313,67 @@ static bool FindNestedTar(const UString &archive, CNestedTar &nested)
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)tolower(c); });
     if (lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".tar") != 0)
         return false;
-    nested.Inner = inner;
     nested.Outer = format;
     return true;
 }
 
-// Unpacks the tar of a compressed tar into scratch; on success tarPath names it.
-static HRESULT UnpackNestedTar(CReporter &reporter, const UString &archive, const CNestedTar &nested,
-                               CScratchDir &scratch, UString &tarPath, std::string &errorText)
+static uint64_t g_scratchLimit = 0;
+
+// The bytes a compressed tar may unpack to in `dir`: the limit set, or the volume's free space less a margin of
+// 1 GiB or a tenth of it, whichever is more.
+static UInt64 ScratchLimit(const UString &dir)
+{
+    if (g_scratchLimit != 0)
+        return g_scratchLimit;
+    struct statvfs fs;
+    if (statvfs(Utf8(dir).c_str(), &fs) != 0)
+        return 0;
+    const UInt64 free = (UInt64)fs.f_bavail * fs.f_frsize;
+    const UInt64 margin = std::max<UInt64>((UInt64)1 << 30, free / 10);
+    return free > margin ? free - margin : 1;
+}
+
+// The file a compressed tar unpacked to in `dir`, the one entry there (its stream holds one item); empty when there is
+// none.
+static UString UnpackedFile(const UString &dir)
+{
+    UString found;
+    if (DIR *d = opendir(Utf8(dir).c_str()))
+    {
+        while (const dirent *entry = readdir(d))
+            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+                found = Wide(entry->d_name);
+        closedir(d);
+    }
+    return found;
+}
+
+// Unpacks the tar of a compressed tar into scratch; on success tarPath names it. The tar is the one file unpacked
+// there, never the name the stream gives it: joined to the scratch folder, a name such as "../../x.tar" opened a tar
+// outside it. It may take ScratchLimit() bytes: a few hundred bytes of bzip2 unpacked to hundreds of MiB.
+static HRESULT UnpackNestedTar(CReporter &reporter, const UString &archive, CScratchDir &scratch, UString &tarPath,
+                               std::string &errorText)
 {
     if (!scratch.Create())
         throw CSystemException(HRESULT_FROM_WIN32(errno));
     reporter.Stages = 2;
     reporter.Stage = 0;
+    reporter.ScratchDir = scratch.Path;
+    reporter.ScratchLimit = ScratchLimit(scratch.Path);
     const HRESULT hr = ExtractWith(reporter, false, archive, scratch.Path, NULL, 0, SEVENZIP_OVERWRITE, NULL, errorText);
-    tarPath = scratch.Path + L"/" + nested.Inner;
+    reporter.ScratchDir.Empty();
+    reporter.ScratchLimit = 0;
     reporter.Stage = 1;
-    return hr;
+    if (hr != S_OK)
+        return hr;
+    const UString tar = UnpackedFile(scratch.Path);
+    if (tar.IsEmpty())
+    {
+        errorText = "The compressed tar does not hold one tar";
+        return E_FAIL;
+    }
+    tarPath = scratch.Path + L"/" + tar;
+    return S_OK;
 }
 
 static int32_t RunExtract(bool test, const char *archive, const char *destination,
@@ -346,7 +393,7 @@ static int32_t RunExtract(bool test, const char *archive, const char *destinatio
     CNestedTar nested;
     if (FindNestedTar(source, nested))
     {
-        const HRESULT hr = UnpackNestedTar(reporter, source, nested, scratch, source, errorText);
+        const HRESULT hr = UnpackNestedTar(reporter, source, scratch, source, errorText);
         if (hr != S_OK || !outcome.FirstError.empty() || outcome.Cancelled)
             return Resolve(hr, outcome, password != NULL, errorText);
     }
@@ -533,8 +580,8 @@ static int32_t RunList(const char *archive, const char *password, SevenZipListin
         COutcome outcome;
         CReporter reporter(NULL, outcome);
         std::string errorText;
-        const HRESULT hr = UnpackNestedTar(reporter, source, nested, scratch, source, errorText);
-        if (hr != S_OK || !outcome.FirstError.empty())
+        const HRESULT hr = UnpackNestedTar(reporter, source, scratch, source, errorText);
+        if (hr != S_OK || !outcome.FirstError.empty() || outcome.NoSpace)
             rc = Resolve(hr, outcome, false, errorText);
     }
     if (rc == SEVENZIP_OK)
@@ -661,6 +708,11 @@ int32_t sevenzip_create(const char *archive, const char *const *sources, size_t 
         AddNames(switches, archive, sources, source_count);
         return RunUpdate(switches, options->password, callbacks);
     });
+}
+
+void sevenzip_set_scratch_limit(uint64_t bytes)
+{
+    g_scratchLimit = bytes;
 }
 
 void sevenzip_set_code_pages(uint32_t oem, uint32_t ansi)

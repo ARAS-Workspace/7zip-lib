@@ -28,6 +28,7 @@ struct COutcome
     bool UnsupportedMethod = false;
     bool DataError = false;
     bool Warning = false;
+    bool NoSpace = false;             // a compressed tar unpacked past its scratch limit
     std::string FirstError;
 };
 
@@ -50,6 +51,10 @@ public:
     // reports one bar: stage Stage of Stages, items only from the last.
     unsigned Stage = 0;
     unsigned Stages = 1;
+
+    // While a compressed tar is unpacked: its scratch folder and the bytes it may take there (0: no limit)
+    UString ScratchDir;
+    UInt64 ScratchLimit = 0;
 
 private:
     const SevenZipCallbacks *_callbacks;

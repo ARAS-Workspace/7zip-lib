@@ -6,6 +6,10 @@
 
 #include "../../CPP/7zip/UI/Common/OpenArchive.h"
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
 std::string Utf8(const UString &s)
 {
     AString a;
@@ -38,11 +42,32 @@ CReporter::CReporter(const SevenZipCallbacks *callbacks, COutcome &outcome):
 
 HRESULT CReporter::CheckBreak()
 {
-    return Outcome.Cancelled ? E_ABORT : S_OK;
+    return Outcome.Cancelled || Outcome.NoSpace ? E_ABORT : S_OK;
+}
+
+// The bytes of the files in `dir`, not below it: a compressed tar unpacks into one.
+static UInt64 BytesIn(const UString &dir)
+{
+    UInt64 bytes = 0;
+    const std::string path = Utf8(dir);
+    if (DIR *d = opendir(path.c_str()))
+    {
+        while (const dirent *entry = readdir(d))
+        {
+            struct stat st;
+            if (fstatat(dirfd(d), entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode))
+                bytes += (UInt64)st.st_size;
+        }
+        closedir(d);
+    }
+    return bytes;
 }
 
 HRESULT CReporter::Progress(UInt64 completed)
 {
+    // A compressed tar can unpack to far more than it takes: stop it at its limit, before the disk is full
+    if (ScratchLimit != 0 && !ScratchDir.IsEmpty() && BytesIn(ScratchDir) > ScratchLimit)
+        Outcome.NoSpace = true;
     if (!_callbacks || !_callbacks->progress)
         return CheckBreak();
     UInt64 done = completed, total = Total;

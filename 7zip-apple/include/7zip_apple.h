@@ -43,6 +43,7 @@ extern "C" {
 #define SEVENZIP_ERR_NO_MEMORY           -8
 #define SEVENZIP_ERR_FAILED              -9   /* anything else; see sevenzip_last_error() */
 #define SEVENZIP_ERR_EXISTS             -10   /* sevenzip_create: the archive is there already */
+#define SEVENZIP_ERR_NO_SPACE           -11   /* a compressed tar would unpack past the scratch limit */
 
 /* ═══════════════════════════════════════════════════════════════
  * Extraction overwrite policy (7zz -aoa / -aou / -aos)
@@ -142,6 +143,18 @@ int32_t sevenzip_create(
     const SevenZipCreateOptions *options,
     const SevenZipCallbacks     *callbacks
 );
+
+/* ═══════════════════════════════════════════════════════════════
+ * Compressed tars
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* A compressed tar (tar.gz, tar.bz2, …) is unpacked into a scratch folder in
+   TMPDIR before it is listed, extracted or tested. The unpacked tar may take
+   at most `bytes`; past it the call stops with SEVENZIP_ERR_NO_SPACE and the
+   scratch folder goes. 0, the default, allows the free space of the scratch
+   folder's volume less a margin of 1 GiB or a tenth of it, whichever is more.
+   Applies to the calls that start after it; never call it while one runs. */
+void sevenzip_set_scratch_limit(uint64_t bytes);
 
 /* ═══════════════════════════════════════════════════════════════
  * Names in a Windows code page
