@@ -44,6 +44,7 @@ for slice in "${SLICES[@]}"; do
     clang_arch="${slice##*:}"
     test_bin="${BUILD}/roundtrip-${clang_arch}"
     clang -arch "${clang_arch}" -Wall -Wextra -Werror \
+        -DEXPECTED_VERSION="\"$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")\"" \
         -I"${SCRIPT_DIR}/include" "${SCRIPT_DIR}/test/roundtrip.c" \
         "${BUILD}/universal/lib7zip_apple.a" -lc++ -framework CoreFoundation -o "${test_bin}"
     if arch "-${clang_arch}" /usr/bin/true 2>/dev/null; then

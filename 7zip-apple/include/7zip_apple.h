@@ -193,7 +193,7 @@ void sevenzip_set_code_pages(uint32_t oem, uint32_t ansi);
 /* Message of the last failed call on this thread, "" if none. Valid until
    the next call on the same thread. */
 const char *sevenzip_last_error(void);
-/* "<7-Zip version>+MacRAR.Patch.<n>" */
+/* "<7-Zip version>+<Consumer>.Patch.<n>", as VERSION holds it */
 const char *sevenzip_get_version(void);
 
 #ifdef __cplusplus

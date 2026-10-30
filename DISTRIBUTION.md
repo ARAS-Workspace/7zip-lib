@@ -10,7 +10,7 @@ main    ip7z/7zip releases + our changes + release-mac    mac-v*  →  lib7zip_a
 
 This fork's own files are `7zip-apple/` (the C API in `include/7zip_apple.h`, its sources in `src/`, `makefile.gcc`, `exports.txt`, `build.sh` and the round-trip test in `test/roundtrip.c`), `.github/` (the release line), `VERSION` and this file. The files of 7-Zip it changes are listed below.
 
-`VERSION` holds `<7-Zip release>+MacRAR.Patch.<n>`. Its base must equal `MY_VERSION_NUMBERS` in `C/7zVersion.h`; `bump.sh`, `release-mac.sh` and the release workflow all refuse a mismatch.
+`VERSION` holds `<7-Zip release>+<Consumer>.Patch.<n>`: the 7-Zip release the tree carries, the app the round serves, and the round. The first release, `26.05+MacRAR.Patch.1`, served MacRAR; the rounds since serve Phantom-Archiver. Its base must equal `MY_VERSION_NUMBERS` in `C/7zVersion.h`; `bump.sh`, `release-mac.sh` and the release workflow all refuse a mismatch.
 
 ## Set up
 
@@ -29,7 +29,7 @@ git -C "$W" fetch upstream --tags
 "$W/7zip-apple/build.sh"
 ```
 
-It builds the library for arm64 and x86_64 (`MACOSX_DEPLOYMENT_TARGET` 13.0 unless set), joins the slices into `7zip-apple/build/universal/lib7zip_apple.a`, refuses any exported symbol outside `sevenzip_*`, and runs the round-trip test against each slice; x86_64 runs under Rosetta and is skipped where it cannot. The test expects the library to report a `+MacRAR.Patch.<n>` version, as `VERSION` does from the first bump on.
+It builds the library for arm64 and x86_64 (`MACOSX_DEPLOYMENT_TARGET` 13.0 unless set), joins the slices into `7zip-apple/build/universal/lib7zip_apple.a`, refuses any exported symbol outside `sevenzip_*`, and runs the round-trip test against each slice; x86_64 runs under Rosetta and is skipped where it cannot. The test expects the library to report the version `VERSION` holds.
 
 ## Take an upstream release
 
@@ -43,7 +43,7 @@ git -C "$W" cherry-pick -x 26.06
 Resolve the conflicts in the files this fork changes, check their change notices (below), build and test, then start the new base:
 
 ```bash
-(cd "$W" && .github/scripts/bump.sh 26.06+MacRAR.Patch.1)
+(cd "$W" && .github/scripts/bump.sh 26.06+PhantomArchiver.Patch.1)
 git -C "$W" push origin main
 ```
 
@@ -75,7 +75,7 @@ git -C "$W" push origin main
 (cd "$W" && .github/scripts/release-mac.sh)
 ```
 
-`release-mac.sh` pushes the tag `mac-v<version>`. The workflow `release-mac.yaml` checks the tag against `VERSION` and `C/7zVersion.h`, builds arm64 and x86_64 and runs the round-trip test (`7zip-apple/build.sh`), and publishes `7zip-apple_<version>_macos_universal.tar.gz`: the universal library, its header, `LICENSE`, `copying.txt` and `CHECKSUM.sha256`.
+`bump.sh` without an argument takes the next round for the consumer `VERSION` names; a new 7-Zip base or a new consumer is given explicitly (`bump.sh 26.05+PhantomArchiver.Patch.1`). `release-mac.sh` pushes the tag `mac-v<version>`. The workflow `release-mac.yaml` checks the tag against `VERSION` and `C/7zVersion.h`, builds arm64 and x86_64 and runs the round-trip test (`7zip-apple/build.sh`), and publishes `7zip-apple_<version>_macos_universal.tar.gz`: the universal library, its header, `LICENSE`, `copying.txt` and `CHECKSUM.sha256`.
 
 ## Verify
 
@@ -88,8 +88,8 @@ gh release list --repo ARAS-Workspace/7zip-lib
 ## Consume
 
 ```bash
-# MacRAR
-V=26.05+MacRAR.Patch.1
+# Phantom-Archiver (MacRAR takes 26.05+MacRAR.Patch.1 the same way)
+V=26.05+PhantomArchiver.Patch.1
 gh release download "mac-v$V" --repo ARAS-Workspace/7zip-lib --dir /tmp/sza
 tar -xzf /tmp/sza/*.tar.gz -C Libraries/SevenZipKit/
 (cd Libraries/SevenZipKit && shasum -a 256 -c CHECKSUM.sha256)

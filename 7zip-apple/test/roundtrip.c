@@ -1,7 +1,9 @@
-// Round-trip checks for lib7zip_apple.a: every call MacRAR makes, against
-// archives this test creates itself.
+// Round-trip checks for lib7zip_apple.a: every call of its C interface,
+// against archives this test creates itself. build.sh gives it the version
+// VERSION holds as EXPECTED_VERSION.
 //
-//   clang -I7zip-apple/include 7zip-apple/test/roundtrip.c \
+//   clang -DEXPECTED_VERSION='"26.05+PhantomArchiver.Patch.1"' \
+//         -I7zip-apple/include 7zip-apple/test/roundtrip.c \
 //         7zip-apple/build/<arch>/lib7zip_apple.a -lc++ -framework CoreFoundation \
 //         -o roundtrip && ./roundtrip
 
@@ -192,7 +194,8 @@ int main(void)
     snprintf(root, sizeof root, "%s/7zip-apple-test-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 2; }
     printf("version %s, workspace %s\n", sevenzip_get_version(), root);
-    CHECK(strstr(sevenzip_get_version(), "+MacRAR.Patch.") != NULL, "unexpected version string\n");
+    CHECK(strcmp(sevenzip_get_version(), EXPECTED_VERSION) == 0, "the library reports %s, VERSION holds %s\n",
+          sevenzip_get_version(), EXPECTED_VERSION);
 
     // Sources: a text file, a binary file in a folder, and a Turkish file name.
     make_dir("src");
@@ -310,7 +313,7 @@ int main(void)
         CHECK(same_file("src/sub/b.bin", "outzip/sub/b.bin"), "zip b.bin differs\n");
     }
 
-    // tar.gz the way MacRAR builds it: tar first, then gzip the tar
+    // tar.gz the way an app builds it: tar first, then gzip the tar
     {
         SevenZipUpdateOptions tar = options("tar");
         tar.level = -1;
