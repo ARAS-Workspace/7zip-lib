@@ -316,9 +316,10 @@ Z7_COM7F_IMF(CExtractCallback::CryptoGetTextPassword(BSTR *password))
     return ProvidePassword(password);
 }
 
+// Past the limit the answer is no: without one, 7-Zip's default answer, allow, stood and the item was extracted.
 Z7_COM7F_IMF(CExtractCallback::RequestMemoryUse(
     UInt32 flags, UInt32, UInt32, const wchar_t *path,
-    UInt64 requiredSize, UInt64 *allowedSize, UInt32 *))
+    UInt64 requiredSize, UInt64 *allowedSize, UInt32 *answerFlags))
 {
     if ((flags & NRequestMemoryUseFlags::k_IsReport) != 0 || requiredSize > *allowedSize)
     {
@@ -329,6 +330,7 @@ Z7_COM7F_IMF(CExtractCallback::RequestMemoryUse(
             message += " : " + Utf8(path);
         if ((flags & NRequestMemoryUseFlags::k_NoErrorMessage) == 0)
             _reporter.Error(message);
+        *answerFlags = NRequestMemoryAnswerFlags::k_Limit_Exceeded;
     }
     return _reporter.CheckBreak();
 }

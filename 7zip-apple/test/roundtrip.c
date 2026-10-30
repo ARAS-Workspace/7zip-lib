@@ -174,6 +174,55 @@ static void write_gzip_named(const char *gz, const char *name, const char *inner
 }
 
 
+/* RAR5's variable-length integer: seven bits a byte, the high bit set on all but the last. */
+static void put_vint(unsigned char **p, unsigned long long v)
+{
+    do {
+        unsigned char b = v & 0x7F;
+        v >>= 7;
+        *(*p)++ = b | (v ? 0x80 : 0);
+    } while (v);
+}
+
+/* One RAR5 header block: the CRC32 of its size and fields, the size, the fields. */
+static void put_rar5_block(unsigned char **p, const unsigned char *fields, size_t size)
+{
+    unsigned char sized[300];
+    unsigned char *q = sized;
+    put_vint(&q, size);
+    memcpy(q, fields, size); q += size;
+    put32(p, crc32_of((const char *)sized, (size_t)(q - sized)));
+    memcpy(*p, sized, (size_t)(q - sized)); *p += q - sized;
+}
+
+/* A RAR5 archive of one file stored as it is, under `name`, whose header asks for a dictionary of
+   (32 << (12 + dictionary)) bytes: algorithm version 1 (RAR 7), so dictionary 16 asks for 8 GB, past 7-Zip's
+   default limit of 4 GB, and 0 for 128 KB. */
+static void write_rar5_stored(const char *archive, const char *name, const char *data, unsigned dictionary)
+{
+    static unsigned char out[1024];
+    unsigned char *p = out;
+    const unsigned char signature[] = { 'R', 'a', 'r', '!', 0x1A, 0x07, 0x01, 0x00 };
+    memcpy(p, signature, sizeof signature); p += sizeof signature;
+    unsigned char fields[300], *f = fields;
+    put_vint(&f, 1); put_vint(&f, 0); put_vint(&f, 0);                    // main header: type, flags, archive flags
+    put_rar5_block(&p, fields, (size_t)(f - fields));
+    const size_t size = strlen(data);
+    f = fields;
+    put_vint(&f, 2); put_vint(&f, 0x0002); put_vint(&f, size);            // file header with a data area of `size`
+    put_vint(&f, 0x0004); put_vint(&f, size); put_vint(&f, 0100644);      // data CRC32 present, unpacked size, mode
+    put32(&f, crc32_of(data, size));
+    put_vint(&f, 1 | (dictionary << 10));                                // algorithm 1, method 0 (store), dictionary
+    put_vint(&f, 1); put_vint(&f, strlen(name));                         // host Unix, the name
+    memcpy(f, name, strlen(name)); f += strlen(name);
+    put_rar5_block(&p, fields, (size_t)(f - fields));
+    memcpy(p, data, size); p += size;
+    f = fields;
+    put_vint(&f, 5); put_vint(&f, 0); put_vint(&f, 0);                    // end of archive
+    put_rar5_block(&p, fields, (size_t)(f - fields));
+    write_file(archive, (const char *)out, (size_t)(p - out));
+}
+
 /* The bytes a compressed tar has unpacked to so far, in its scratch folders in TMPDIR. */
 static uint64_t scratch_bytes(void)
 {
@@ -577,6 +626,23 @@ int main(void)
         CHECK(scratch_left() == 0, "the bomb's scratch folder was left\n");
         sevenzip_set_scratch_limit(0);
         EXPECT(listed("pack.tar.gz", NULL, NULL, NULL), SEVENZIP_OK);
+    }
+
+    // An item whose dictionary is past the default memory limit (4 GB) is not extracted: 7-Zip asks, and the answer is
+    // no, as 7zz's. The same archive with a dictionary of 128 KB extracts.
+    {
+        write_rar5_stored("smalldict.rar", "small.txt", "stored data", 0);
+        make_dir("outsmall");
+        EXPECT(sevenzip_extract(path("smalldict.rar"), path("outsmall"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_OK);
+        size_t n = 0;
+        char *small = read_file("outsmall/small.txt", &n);
+        CHECK(small && n == 11 && memcmp(small, "stored data", 11) == 0, "the stored item did not extract as written\n");
+        free(small);
+        write_rar5_stored("bigdict.rar", "big.txt", "stored data", 16);
+        make_dir("outbig");
+        CHECK(sevenzip_extract(path("bigdict.rar"), path("outbig"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL) != SEVENZIP_OK,
+              "an archive past the memory limit extracted without a word\n");
+        CHECK(!exists("outbig/big.txt"), "an item past the memory limit was extracted\n");
     }
 
     // Failures
