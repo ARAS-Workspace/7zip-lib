@@ -106,7 +106,7 @@ private:
     UString _currentName;
 };
 
-/* The 7zz add/delete callback without the console. */
+/* The 7zz add callback without the console. */
 class CUpdateCallback Z7_final: public IUpdateCallbackUI2
 {
     Z7_IFACE_IMP(IUpdateCallbackUI)

@@ -140,8 +140,7 @@ static void AddPassword(UStringVector &switches, const char *password)
         switches.Add(UString(L"-p") + Wide(password));
 }
 
-// A missing name is refused: left out, a list of nothing but missing names became 7-Zip's "everything" ("*"),
-// which deleted every item.
+// A missing name is refused: left out, a list of nothing but missing names became 7-Zip's "everything" ("*").
 static void AddNames(UStringVector &switches, const char *archive, const char *const *names, size_t count)
 {
     switches.Add(L"--");
@@ -653,141 +652,8 @@ int32_t sevenzip_update(const char *archive, const char *const *sources, size_t 
             s += L"b";
             switches.Add(s);
         }
-        if (options->delete_sources)
-            switches.Add(L"-sdel");
         AddNames(switches, archive, sources, source_count);
         return RunUpdate(switches, options->password, callbacks);
-    });
-}
-
-int32_t sevenzip_delete(const char *archive, const char *const *items, size_t item_count,
-                        const char *password, bool encrypt_headers, const SevenZipCallbacks *callbacks)
-{
-    return Guarded([&] {
-        if (!archive || !items || item_count == 0)
-            return Fail(SEVENZIP_ERR_INVALID_PARAM, "Archive and items are required");
-        UStringVector switches;
-        switches.Add(L"d");
-        switches.Add(L"-y");
-        switches.Add(L"-spd");
-        switches.Add(L"-sae");
-        // Each name is the whole path of an item: without -spf a name with a "." or ".." part, or one starting with
-        // "/", lost its first parts, so "./a.txt" deleted "a.txt" and "." or ".." deleted every item
-        switches.Add(L"-spf");
-        AddPassword(switches, password);
-        if (password && encrypt_headers)
-            switches.Add(L"-mhe=on");
-        AddNames(switches, archive, items, item_count);
-        return RunUpdate(switches, password, callbacks);
-    });
-}
-
-// Whether `path` names an item inside an archive: not empty, no "/" at either end, no empty, "." or ".." part.
-static bool IsInnerPath(const std::string &path)
-{
-    if (path.empty())
-        return false;
-    size_t start = 0;
-    while (true)
-    {
-        const size_t slash = path.find('/', start);
-        const std::string part = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
-        if (part.empty() || part == "." || part == "..")
-            return false;
-        if (slash == std::string::npos)
-            return true;
-        start = slash + 1;
-    }
-}
-
-// Why the pairs cannot be applied to the items listed, with its code; SEVENZIP_OK when they can. 7-Zip itself renames
-// whatever matches and nothing else: a name that matches nothing still rewrites the archive, a new name that is taken
-// makes a second item of that name, and an item two pairs name takes the first one only.
-static int32_t RenameProblem(const SevenZipListing &listing, const std::vector<std::string> &olds,
-                             const std::vector<std::string> &news, std::string &problem)
-{
-    auto under = [](const std::string &path, const std::string &folder) {
-        return path.size() > folder.size() && path.compare(0, folder.size(), folder) == 0 && path[folder.size()] == '/';
-    };
-    auto refuse = [&](int32_t code, const std::string &reason) {
-        problem = reason;
-        return code;
-    };
-    auto renamed = [&](const std::string &path) {
-        for (const std::string &o : olds)
-            if (path == o || under(path, o))
-                return true;
-        return false;
-    };
-    for (size_t i = 0; i < olds.size(); i++)
-    {
-        const std::string &o = olds[i], &n = news[i];
-        if (!IsInnerPath(o) || !IsInnerPath(n))
-            return refuse(SEVENZIP_ERR_INVALID_PARAM,
-                          "\"" + (IsInnerPath(o) ? n : o) + "\" is not a path inside an archive");
-        if (n == o || under(n, o))
-            return refuse(SEVENZIP_ERR_INVALID_PARAM, "\"" + n + "\" is \"" + o + "\" or inside it");
-        bool found = false;
-        for (const SevenZipListing::Entry &e : listing.Entries)
-            found = found || e.Path == o || under(e.Path, o);
-        if (!found)
-            return refuse(SEVENZIP_ERR_NOT_FOUND, "No item is named \"" + o + "\"");
-        for (size_t j = 0; j < i; j++)
-        {
-            if (news[j] == n)
-                return refuse(SEVENZIP_ERR_INVALID_PARAM, "Two items would be named \"" + n + "\"");
-            if (olds[j] == o || under(o, olds[j]) || under(olds[j], o))
-                return refuse(SEVENZIP_ERR_INVALID_PARAM, "\"" + o + "\" would be renamed twice");
-        }
-        for (const SevenZipListing::Entry &e : listing.Entries)
-        {
-            if (renamed(e.Path))
-                continue;
-            if (e.Path == n || under(e.Path, n))
-                return refuse(SEVENZIP_ERR_EXISTS, "An item named \"" + n + "\" exists");
-            if (!e.Item.is_dir && under(n, e.Path))
-                return refuse(SEVENZIP_ERR_EXISTS, "\"" + e.Path + "\" is a file, not a folder");
-        }
-    }
-    return SEVENZIP_OK;
-}
-
-int32_t sevenzip_rename(const char *archive, const char *const *pairs, size_t pair_count, const char *password,
-                        const SevenZipCallbacks *callbacks)
-{
-    return Guarded([&] {
-        if (!archive || !pairs || pair_count == 0)
-            return Fail(SEVENZIP_ERR_INVALID_PARAM, "Archive and pairs are required");
-        std::vector<std::string> olds, news;
-        for (size_t i = 0; i < pair_count; i++)
-        {
-            const char *o = pairs[2 * i], *n = pairs[2 * i + 1];
-            if (!o || !n)
-                return Fail(SEVENZIP_ERR_INVALID_PARAM, "A name is missing");
-            olds.push_back(o);
-            news.push_back(n);
-        }
-        // A compressed tar would be renamed in its outer stream, where the tar's items are not
-        CNestedTar nested;
-        if (FindNestedTar(Wide(archive), nested))
-            return Fail(SEVENZIP_ERR_UNSUPPORTED, "A compressed tar cannot be changed");
-        SevenZipListing listing;
-        const int32_t listed = ListPath(Wide(archive), password, &listing);
-        if (listed != SEVENZIP_OK && listed != SEVENZIP_WARNING)
-            return listed;
-        std::string problem;
-        const int32_t refused = RenameProblem(listing, olds, news, problem);
-        if (refused != SEVENZIP_OK)
-            return Fail(refused, problem);
-
-        UStringVector switches;
-        // The password reaches 7-Zip through the callbacks, and an archive whose names are encrypted stays so
-        switches.Add(L"rn");
-        switches.Add(L"-y");
-        switches.Add(L"-spd");
-        switches.Add(L"-sae");
-        AddNames(switches, archive, pairs, 2 * pair_count);
-        return RunUpdate(switches, password, callbacks);
     });
 }
 
