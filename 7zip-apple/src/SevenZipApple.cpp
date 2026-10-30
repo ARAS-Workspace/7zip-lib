@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <ftw.h>
 #include <new>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -619,12 +620,17 @@ int32_t sevenzip_test(const char *archive, const char *password, const SevenZipC
     });
 }
 
-int32_t sevenzip_update(const char *archive, const char *const *sources, size_t source_count,
-                        const SevenZipUpdateOptions *options, const SevenZipCallbacks *callbacks)
+int32_t sevenzip_create(const char *archive, const char *const *sources, size_t source_count,
+                        const SevenZipCreateOptions *options, const SevenZipCallbacks *callbacks)
 {
     return Guarded([&] {
         if (!archive || !sources || source_count == 0 || !options || !options->format)
             return Fail(SEVENZIP_ERR_INVALID_PARAM, "Archive, sources and format are required");
+        // 7-Zip adds to an archive already at the path; the first volume stands for a split one
+        const std::string written = options->volume_size > 0 ? std::string(archive) + ".001" : std::string(archive);
+        struct stat st;
+        if (lstat(written.c_str(), &st) == 0)
+            return Fail(SEVENZIP_ERR_EXISTS, "\"" + written + "\" exists");
         UStringVector switches;
         switches.Add(L"a");
         switches.Add(L"-y");

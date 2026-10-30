@@ -179,9 +179,9 @@ static void write_tar(const char *name, const char *const *names, int count)
     write_file(name, tar, (size_t)(p - tar) + 1024);
 }
 
-static SevenZipUpdateOptions options(const char *format)
+static SevenZipCreateOptions options(const char *format)
 {
-    SevenZipUpdateOptions o;
+    SevenZipCreateOptions o;
     memset(&o, 0, sizeof o);
     o.format = format;
     o.level = 5;
@@ -210,11 +210,11 @@ int main(void)
 
     // 7z: create, list, extract, test
     {
-        SevenZipUpdateOptions o = options("7z");
+        SevenZipCreateOptions o = options("7z");
         o.solid = 1;
         int progress = 0;
         SevenZipCallbacks cb = { &progress, count_progress, NULL, NULL };
-        EXPECT(sevenzip_update(path("plain.7z"), sources, 2, &o, &cb), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("plain.7z"), sources, 2, &o, &cb), SEVENZIP_OK);
         CHECK(progress > 0, "no progress reported\n");
 
         uint32_t count = 0;
@@ -252,19 +252,28 @@ int main(void)
         EXPECT(sevenzip_extract(path("plain.7z"), path("out7z"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_OK);
         CHECK(same_file("src/a.txt", "out7z/a.txt"), "overwrite mode left a.txt changed\n");
 
-        // Add to the existing archive
-        const char *more[] = { path("src/a.txt") };
-        EXPECT(sevenzip_update(path("plain.7z"), more, 1, &o, NULL), SEVENZIP_OK);
+        // An archive already at the path is left as it is, and so is the first volume of a split one
+        write_file("extra.txt", "extra", 5);
+        const char *more[] = { path("extra.txt") };
+        EXPECT(sevenzip_create(path("plain.7z"), more, 1, &o, NULL), SEVENZIP_ERR_EXISTS);
         EXPECT(listed("plain.7z", NULL, &count, NULL), SEVENZIP_OK);
-        CHECK(count == 4, "after add 7z lists %u items, expected 4\n", count);
+        CHECK(count == 4, "creating over plain.7z changed it: %u items\n", count);
+        SevenZipCreateOptions split = o;
+        split.volume_size = 1 << 20;
+        write_file("taken.7z.001", "x", 1);
+        EXPECT(sevenzip_create(path("taken.7z"), more, 1, &split, NULL), SEVENZIP_ERR_EXISTS);
+        n = 0;
+        char *first = read_file("taken.7z.001", &n);
+        CHECK(first && n == 1 && !exists("taken.7z.002"), "creating a split archive wrote over taken.7z.001\n");
+        free(first);
     }
 
     // 7z with encrypted headers
     {
-        SevenZipUpdateOptions o = options("7z");
+        SevenZipCreateOptions o = options("7z");
         o.password = "sır-parola";
         o.encrypt_headers = true;
-        EXPECT(sevenzip_update(path("secret.7z"), sources, 2, &o, NULL), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("secret.7z"), sources, 2, &o, NULL), SEVENZIP_OK);
         EXPECT(listed("secret.7z", NULL, NULL, NULL), SEVENZIP_ERR_PASSWORD_REQUIRED);
         EXPECT(listed("secret.7z", "wrong", NULL, NULL), SEVENZIP_ERR_WRONG_PASSWORD);
         SevenZipListing *listing = NULL;
@@ -284,10 +293,10 @@ int main(void)
 
     // zip with AES-256: names readable, data encrypted
     {
-        SevenZipUpdateOptions o = options("zip");
+        SevenZipCreateOptions o = options("zip");
         o.password = "zip-pass";
         o.zip_aes256 = true;
-        EXPECT(sevenzip_update(path("secret.zip"), sources, 2, &o, NULL), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("secret.zip"), sources, 2, &o, NULL), SEVENZIP_OK);
         SevenZipListing *listing = NULL;
         EXPECT(listed("secret.zip", NULL, NULL, &listing), SEVENZIP_OK);
         SevenZipItem item;
@@ -309,12 +318,12 @@ int main(void)
 
     // tar.gz the way an app builds it: tar first, then gzip the tar
     {
-        SevenZipUpdateOptions tar = options("tar");
+        SevenZipCreateOptions tar = options("tar");
         tar.level = -1;
-        EXPECT(sevenzip_update(path("pack.tar"), sources, 2, &tar, NULL), SEVENZIP_OK);
-        SevenZipUpdateOptions gz = options("gzip");
+        EXPECT(sevenzip_create(path("pack.tar"), sources, 2, &tar, NULL), SEVENZIP_OK);
+        SevenZipCreateOptions gz = options("gzip");
         const char *tarball[] = { path("pack.tar") };
-        EXPECT(sevenzip_update(path("pack.tar.gz"), tarball, 1, &gz, NULL), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("pack.tar.gz"), tarball, 1, &gz, NULL), SEVENZIP_OK);
         SevenZipListing *listing = NULL;
         uint32_t count = 0;
         EXPECT(listed("pack.tar.gz", NULL, &count, &listing), SEVENZIP_OK);
@@ -332,10 +341,10 @@ int main(void)
 
     // Split volumes
     {
-        SevenZipUpdateOptions o = options("7z");
+        SevenZipCreateOptions o = options("7z");
         o.level = 0;
         o.volume_size = 300000;
-        EXPECT(sevenzip_update(path("vol.7z"), sources, 2, &o, NULL), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("vol.7z"), sources, 2, &o, NULL), SEVENZIP_OK);
         CHECK(exists("vol.7z.001") && exists("vol.7z.004"), "volumes were not written\n");
         SevenZipListing *listing = NULL;
         EXPECT(listed("vol.7z.001", NULL, NULL, &listing), SEVENZIP_OK);
@@ -387,16 +396,16 @@ int main(void)
         write_file("wild/a1.txt", "2", 1);
         write_file("wild/b?.txt", "3", 1);
         write_file("wild/bx.txt", "4", 1);
-        SevenZipUpdateOptions o = options("zip");
+        SevenZipCreateOptions o = options("zip");
         uint32_t count = 0;
         SevenZipListing *listing = NULL;
         const char *star[] = { path("wild/a*.txt") };
-        EXPECT(sevenzip_update(path("wild.zip"), star, 1, &o, NULL), SEVENZIP_OK);
-        EXPECT(listed("wild.zip", NULL, &count, &listing), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("star.zip"), star, 1, &o, NULL), SEVENZIP_OK);
+        EXPECT(listed("star.zip", NULL, &count, &listing), SEVENZIP_OK);
         CHECK(count == 1 && has_item(listing, "a*.txt"), "adding a*.txt added %u items\n", count);
         sevenzip_listing_free(listing);
-        const char *rest[] = { path("wild/a1.txt"), path("wild/b?.txt"), path("wild/bx.txt") };
-        EXPECT(sevenzip_update(path("wild.zip"), rest, 3, &o, NULL), SEVENZIP_OK);
+        const char *all[] = { path("wild/a*.txt"), path("wild/a1.txt"), path("wild/b?.txt"), path("wild/bx.txt") };
+        EXPECT(sevenzip_create(path("wild.zip"), all, 4, &o, NULL), SEVENZIP_OK);
 
         make_dir("outwild");
         const char *one[] = { "a*.txt" };
@@ -415,8 +424,8 @@ int main(void)
         CHECK(count == 7 && has_item(listing, "./a.txt") && has_item(listing, "a.txt"), "dots.tar lists %u items\n", count);
         sevenzip_listing_free(listing);
 
-        SevenZipUpdateOptions z = options("zip");
-        EXPECT(sevenzip_update(path("folder.zip"), sources, 2, &z, NULL), SEVENZIP_OK);
+        SevenZipCreateOptions z = options("zip");
+        EXPECT(sevenzip_create(path("folder.zip"), sources, 2, &z, NULL), SEVENZIP_OK);
 
         // A "*" in the destination stays
         make_dir("dst*star");
@@ -424,12 +433,13 @@ int main(void)
         CHECK(exists("dst*star/a.txt"), "the destination's * was replaced\n");
 
         // An archive without an extension is the file named, never one with an extension added
-        EXPECT(sevenzip_update(path("noext"), sources, 2, &z, NULL), SEVENZIP_OK);
+        EXPECT(sevenzip_create(path("noext"), sources, 2, &z, NULL), SEVENZIP_OK);
         CHECK(exists("noext") && !exists("noext.zip"), "the archive was written under another name\n");
 
         // A missing name is refused, never read as "everything"
         const char *missing[] = { NULL };
-        EXPECT(sevenzip_update(path("folder.zip"), missing, 1, &z, NULL), SEVENZIP_ERR_INVALID_PARAM);
+        EXPECT(sevenzip_create(path("missing.zip"), missing, 1, &z, NULL), SEVENZIP_ERR_INVALID_PARAM);
+        CHECK(!exists("missing.zip"), "a missing name wrote an archive\n");
         make_dir("outmissing");
         EXPECT(sevenzip_extract(path("folder.zip"), path("outmissing"), missing, 1, SEVENZIP_OVERWRITE, NULL, NULL),
                SEVENZIP_ERR_INVALID_PARAM);

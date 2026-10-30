@@ -42,6 +42,7 @@ extern "C" {
 #define SEVENZIP_ERR_DATA                -7   /* CRC, data or headers error in the archive */
 #define SEVENZIP_ERR_NO_MEMORY           -8
 #define SEVENZIP_ERR_FAILED              -9   /* anything else; see sevenzip_last_error() */
+#define SEVENZIP_ERR_EXISTS             -10   /* sevenzip_create: the archive is there already */
 
 /* ═══════════════════════════════════════════════════════════════
  * Extraction overwrite policy (7zz -aoa / -aou / -aos)
@@ -58,7 +59,7 @@ typedef struct {
     /* Bytes done of total. Return true to cancel the operation. */
     bool (*progress)(void *context, uint64_t completed, uint64_t total);
     /* The item now being processed: its path inside the archive
-       (extract, test) or on disk (update). */
+       (extract, test) or on disk (create). */
     void (*item)(void *context, const char *path);
     /* A per-item error or warning, worded the way 7zz prints it. */
     void (*message)(void *context, const char *message);
@@ -118,7 +119,7 @@ int32_t sevenzip_extract(
 int32_t sevenzip_test(const char *archive, const char *password, const SevenZipCallbacks *callbacks);
 
 /* ═══════════════════════════════════════════════════════════════
- * Create and add (7zz a)
+ * Create (7zz a)
  * ═══════════════════════════════════════════════════════════════ */
 typedef struct {
     const char *format;          /* -t: "7z", "zip", "tar", "gzip", "xz", "bzip2" */
@@ -128,15 +129,17 @@ typedef struct {
     bool        encrypt_headers; /* -mhe=on (7z) */
     bool        zip_aes256;      /* -mem=AES256 (zip) */
     uint64_t    volume_size;     /* -v…b: 0 for a single file */
-} SevenZipUpdateOptions;
+} SevenZipCreateOptions;
 
-/* Creates the archive or adds sources (files or folders) to an existing one;
-   each source is stored under its own name. */
-int32_t sevenzip_update(
+/* Creates the archive from sources (files or folders), each stored under its
+   own name. An archive is never changed: when something is at the path
+   already, or at its first volume (archive.001) with volume_size, nothing is
+   written and the call returns SEVENZIP_ERR_EXISTS. */
+int32_t sevenzip_create(
     const char                  *archive,
     const char *const           *sources,
     size_t                       source_count,
-    const SevenZipUpdateOptions *options,
+    const SevenZipCreateOptions *options,
     const SevenZipCallbacks     *callbacks
 );
 
