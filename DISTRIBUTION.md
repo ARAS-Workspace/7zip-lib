@@ -57,7 +57,7 @@ git -C "$W" push origin main
 //   2026-10-13: On Apple systems, CodePageToUnicodeString() reads ...
 ```
 
-The files changed so far: `CPP/7zip/Archive/Zip/ZipItem.cpp`, `CPP/Common/StringConvert.cpp`, `CPP/Common/StringConvert.h`. A commit that changes one of 7-Zip's files adds it here. When an upstream release is taken, check that each notice survived the cherry-pick and that its "from 7-Zip" names the new release. The release archive carries `DOC/License.txt` as `LICENSE` and the full LGPL text as `copying.txt`.
+The files changed so far: `CPP/7zip/Archive/Zip/ZipItem.cpp`, `CPP/7zip/UI/Common/ArchiveExtractCallback.cpp`, `CPP/7zip/UI/Common/ArchiveExtractCallback.h`, `CPP/7zip/UI/Common/Extract.cpp`, `CPP/7zip/UI/Common/Extract.h`, `CPP/Common/StringConvert.cpp`, `CPP/Common/StringConvert.h`. A commit that changes one of 7-Zip's files adds it here. When an upstream release is taken, check that each notice survived the cherry-pick and that its "from 7-Zip" names the new release. The release archive carries `DOC/License.txt` as `LICENSE` and the full LGPL text as `copying.txt`.
 
 7-Zip's own console, `7zz`, still builds from this tree with 7-Zip's makefiles, for comparing the library with it. The code page reader links CoreFoundation, and the x64 makefile's 10.15 target is older than current SDKs accept:
 

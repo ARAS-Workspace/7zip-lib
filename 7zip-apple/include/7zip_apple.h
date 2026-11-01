@@ -106,7 +106,11 @@ bool sevenzip_listing_item(const SevenZipListing *listing, uint32_t index, Seven
  * ═══════════════════════════════════════════════════════════════ */
 
 /* items: paths inside the archive, each with everything under it;
-   NULL or item_count 0 extracts everything. */
+   NULL or item_count 0 extracts everything.
+   An archive that carries com.apple.quarantine passes it on: every folder,
+   file and link the extraction makes takes it as it is made, before any data
+   is written (a read-only file is made writable for it, then given its
+   mode); a folder that was already there is left as it was. */
 int32_t sevenzip_extract(
     const char              *archive,
     const char              *destination,

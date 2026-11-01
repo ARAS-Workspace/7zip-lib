@@ -1,4 +1,7 @@
 // ArchiveExtractCallback.h
+// Changed by ARAS-Workspace (https://github.com/ARAS-Workspace/7zip-lib) from 7-Zip 26.05:
+//   2026-11-01: On Apple systems, QuarantineBuf and SetQuarantine(): every item an extraction
+//               makes takes the archive's com.apple.quarantine as it is made.
 
 #ifndef ZIP7_INC_ARCHIVE_EXTRACT_CALLBACK_H
 #define ZIP7_INC_ARCHIVE_EXTRACT_CALLBACK_H
@@ -481,6 +484,15 @@ public:
 #if defined(_WIN32) && !defined(UNDER_CE) && !defined(Z7_SFX)
   NExtract::NZoneIdMode::EEnum ZoneMode;
   CByteBuffer ZoneBuf;
+#endif
+
+#ifdef __APPLE__
+  // the archive's com.apple.quarantine, given to each folder, file and link as it is made
+  CByteBuffer QuarantineBuf;
+  void SetQuarantine(CFSTR path) const;
+private:
+  UInt32 _quarantine_FinalMode;
+public:
 #endif
 
   CMyComPtr2_Create<ICompressProgressInfo, CLocalProgress> LocalProgressSpec;

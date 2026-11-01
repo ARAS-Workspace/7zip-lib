@@ -1,4 +1,7 @@
 // Extract.cpp
+// Changed by ARAS-Workspace (https://github.com/ARAS-Workspace/7zip-lib) from 7-Zip 26.05:
+//   2026-11-01: On Apple systems, each archive's extraction callback takes the options'
+//               Quarantine before the archive is extracted.
 
 #include "StdAfx.h"
 
@@ -367,6 +370,9 @@ HRESULT Extract(
       continue;
 
     ecs->InitBeforeNewArchive();
+   #ifdef __APPLE__
+    ecs->QuarantineBuf = options.Quarantine;
+   #endif
 
     const UString &arcPath = arcPaths[i];
     NFind::CFileInfo fi;

@@ -1,4 +1,7 @@
 // Extract.h
+// Changed by ARAS-Workspace (https://github.com/ARAS-Workspace/7zip-lib) from 7-Zip 26.05:
+//   2026-11-01: On Apple systems, CExtractOptionsBase::Quarantine, the com.apple.quarantine
+//               value every item an extraction makes takes.
 
 #ifndef ZIP7_INC_EXTRACT_H
 #define ZIP7_INC_EXTRACT_H
@@ -41,6 +44,10 @@ struct CExtractOptionsBase
   
   FString OutputDir; // normalized : with path separator at the end
   UString HashDir;
+
+ #ifdef __APPLE__
+  CByteBuffer Quarantine;
+ #endif
 
   CExtractOptionsBase():
       ExcludeDirItems(false),

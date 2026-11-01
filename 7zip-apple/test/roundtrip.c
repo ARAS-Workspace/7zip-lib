@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 static int failures = 0;
@@ -303,6 +304,79 @@ static void write_tar(const char *name, const char *const *names, int count)
         if (!folder) { p[0] = 'x'; p += 512; }
     }
     write_file(name, tar, (size_t)(p - tar) + 1024);
+}
+
+typedef struct {
+    const char *name;
+    char type;          /* '0' a file of one byte, '5' a folder, '2' a symbolic link */
+    const char *mode;
+    const char *link;
+} TarEntry;
+
+static void write_tar_entries(const char *name, const TarEntry *entries, int count)
+{
+    static char tar[16384];
+    memset(tar, 0, sizeof tar);
+    char *p = tar;
+    for (int i = 0; i < count; i++) {
+        const int data = entries[i].type == '0';
+        memcpy(p, entries[i].name, strlen(entries[i].name));
+        memcpy(p + 100, entries[i].mode, 7);
+        memcpy(p + 108, "0000000", 7);
+        memcpy(p + 116, "0000000", 7);
+        snprintf(p + 124, 12, "%011o", data ? 1 : 0);
+        snprintf(p + 136, 12, "%011o", 1700000000);
+        p[156] = entries[i].type;
+        if (entries[i].link) memcpy(p + 157, entries[i].link, strlen(entries[i].link));
+        memcpy(p + 257, "ustar", 6);
+        memcpy(p + 263, "00", 2);
+        memset(p + 148, ' ', 8);
+        unsigned sum = 0;
+        for (int j = 0; j < 512; j++) sum += (unsigned char)p[j];
+        snprintf(p + 148, 7, "%06o", sum);
+        p += 512;
+        if (data) { p[0] = 'x'; p += 512; }
+    }
+    write_file(name, tar, (size_t)(p - tar) + 1024);
+}
+
+/* Whether the item at name, not what a link points to, carries this com.apple.quarantine; NULL asks for none. */
+static int carries(const char *name, const char *mark)
+{
+    char value[256];
+    const ssize_t size = getxattr(path(name), "com.apple.quarantine", value, sizeof value, 0, XATTR_NOFOLLOW);
+    if (!mark) return size < 0;
+    return size == (ssize_t)strlen(mark) && memcmp(value, mark, (size_t)size) == 0;
+}
+
+static const char *g_quarantine_mark;
+static int g_items_seen;
+static int g_unmarked;
+
+static void count_item(void *context, const char *item)
+{
+    (void)context; (void)item;
+    g_items_seen++;
+}
+
+/* Cancels once the extraction has reached its third item. */
+static bool cancel_at_third(void *context, uint64_t completed, uint64_t total)
+{
+    (void)context; (void)completed; (void)total;
+    return g_items_seen >= 3;
+}
+
+static int check_marked(const char *entry, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)st; (void)flag;
+    if (ftw->level == 0) return 0;
+    char value[256];
+    const ssize_t size = getxattr(entry, "com.apple.quarantine", value, sizeof value, 0, XATTR_NOFOLLOW);
+    if (size != (ssize_t)strlen(g_quarantine_mark) || memcmp(value, g_quarantine_mark, (size_t)size) != 0) {
+        printf("unmarked: %s\n", entry);
+        g_unmarked++;
+    }
+    return 0;
 }
 
 static SevenZipCreateOptions options(const char *format)
@@ -643,6 +717,61 @@ int main(void)
         CHECK(sevenzip_extract(path("bigdict.rar"), path("outbig"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL) != SEVENZIP_OK,
               "an archive past the memory limit extracted without a word\n");
         CHECK(!exists("outbig/big.txt"), "an item past the memory limit was extracted\n");
+    }
+
+    // Quarantine: an archive that carries com.apple.quarantine passes it on to every folder, file and link the
+    // extraction makes, as each is made: a read-only file takes it and keeps its mode, a folder that was there
+    // already keeps what it had, a tar.gz passes on its own mark (not that of the tar it unpacks to), an archive
+    // without one passes nothing on, and an extraction cancelled partway leaves only marked items behind.
+    {
+        const char *mark = "0081;6543210a;Safari;5A3F0B21-7C44-4E0B-9C1E-2F7D1B6A0C3D";
+        g_quarantine_mark = mark;
+        const TarEntry entries[] = {
+            { "q/", '5', "0000755", NULL },
+            { "q/ro.txt", '0', "0000444", NULL },
+            { "q/dir/", '5', "0000755", NULL },
+            { "q/dir/in.txt", '0', "0000644", NULL },
+            { "q/link", '2', "0000777", "ro.txt" },
+            { "kept/", '5', "0000755", NULL },
+            { "kept/new.txt", '0', "0000644", NULL },
+        };
+        write_tar_entries("q.tar", entries, 7);
+        CHECK(setxattr(path("q.tar"), "com.apple.quarantine", mark, strlen(mark), 0, 0) == 0, "q.tar could not be marked\n");
+        make_dir("outq");
+        make_dir("outq/kept");
+        EXPECT(sevenzip_extract(path("q.tar"), path("outq"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_OK);
+        const char *marked[] = { "outq/q", "outq/q/ro.txt", "outq/q/dir", "outq/q/dir/in.txt", "outq/q/link", "outq/kept/new.txt" };
+        for (size_t i = 0; i < sizeof marked / sizeof *marked; i++)
+            CHECK(carries(marked[i], mark), "%s does not carry the archive's quarantine\n", marked[i]);
+        CHECK(carries("outq/kept", NULL), "outq/kept, there before, took the quarantine\n");
+        struct stat st;
+        CHECK(lstat(path("outq/q/ro.txt"), &st) == 0 && (st.st_mode & 0777) == 0444, "q/ro.txt lost its mode 444\n");
+        CHECK(lstat(path("outq/q/link"), &st) == 0 && S_ISLNK(st.st_mode), "q/link was not made a link\n");
+
+        SevenZipCreateOptions gz = options("gzip");
+        const char *tarSource[] = { path("q.tar") };
+        EXPECT(sevenzip_create(path("q.tar.gz"), tarSource, 1, &gz, NULL), SEVENZIP_OK);
+        removexattr(path("q.tar"), "com.apple.quarantine", 0);
+        const char *gzMark = "0083;6543210b;Firefox;";
+        CHECK(setxattr(path("q.tar.gz"), "com.apple.quarantine", gzMark, strlen(gzMark), 0, 0) == 0, "q.tar.gz could not be marked\n");
+        make_dir("outqgz");
+        EXPECT(sevenzip_extract(path("q.tar.gz"), path("outqgz"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_OK);
+        CHECK(carries("outqgz/q/ro.txt", gzMark), "an item of a tar.gz does not carry the tar.gz's quarantine\n");
+
+        make_dir("outplain");
+        EXPECT(sevenzip_extract(path("q.tar"), path("outplain"), NULL, 0, SEVENZIP_OVERWRITE, NULL, NULL), SEVENZIP_OK);
+        CHECK(carries("outplain/q/ro.txt", NULL) && carries("outplain/q", NULL), "an archive without quarantine passed one on\n");
+
+        CHECK(setxattr(path("q.tar"), "com.apple.quarantine", mark, strlen(mark), 0, 0) == 0, "q.tar could not be marked\n");
+        make_dir("outqcancel");
+        g_items_seen = 0;
+        SevenZipCallbacks stopping = { NULL, cancel_at_third, count_item, NULL };
+        const int32_t stopped = sevenzip_extract(path("q.tar"), path("outqcancel"), NULL, 0, SEVENZIP_OVERWRITE, NULL, &stopping);
+        printf("the marked extraction cancelled at item %d returned %d\n", g_items_seen, stopped);
+        CHECK(stopped == SEVENZIP_ERR_CANCELLED, "the extraction was not cancelled partway\n");
+        g_unmarked = 0;
+        nftw(path("outqcancel"), check_marked, 16, FTW_PHYS);
+        CHECK(exists("outqcancel/q") && g_unmarked == 0, "a cancelled extraction left %d unmarked item(s)\n", g_unmarked);
     }
 
     // Failures

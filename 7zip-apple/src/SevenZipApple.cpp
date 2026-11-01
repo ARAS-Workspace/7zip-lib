@@ -22,6 +22,7 @@
 #include <new>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #include <vector>
 
@@ -160,7 +161,7 @@ static void AddNames(UStringVector &switches, const char *archive, const char *c
 
 static HRESULT ExtractWith(CReporter &reporter, bool test, const UString &archive, const UString &destination,
                            const char *const *items, size_t itemCount, int32_t overwrite, const char *password,
-                           std::string &errorText)
+                           const CByteBuffer &quarantine, std::string &errorText)
 {
     Int32 answer;
     const wchar_t *mode;
@@ -210,6 +211,7 @@ static HRESULT ExtractWith(CReporter &reporter, bool test, const UString &archiv
     eo.YesToAll = true;
     eo.TestMode = test;
     eo.Properties = options.Properties;
+    eo.Quarantine = quarantine;
 
     UStringVector paths, fullPaths;
     paths.Add(archive);
@@ -360,7 +362,8 @@ static HRESULT UnpackNestedTar(CReporter &reporter, const UString &archive, CScr
     reporter.Stage = 0;
     reporter.ScratchDir = scratch.Path;
     reporter.ScratchLimit = ScratchLimit(scratch.Path);
-    const HRESULT hr = ExtractWith(reporter, false, archive, scratch.Path, NULL, 0, SEVENZIP_OVERWRITE, NULL, errorText);
+    const HRESULT hr = ExtractWith(reporter, false, archive, scratch.Path, NULL, 0, SEVENZIP_OVERWRITE, NULL, CByteBuffer(),
+                                   errorText);
     reporter.ScratchDir.Empty();
     reporter.ScratchLimit = 0;
     reporter.Stage = 1;
@@ -374,6 +377,19 @@ static HRESULT UnpackNestedTar(CReporter &reporter, const UString &archive, CScr
     }
     tarPath = scratch.Path + L"/" + tar;
     return S_OK;
+}
+
+// The archive's com.apple.quarantine, read from the archive given (not the tar a compressed tar unpacks to), which
+// every item the extraction makes takes as it is made
+static void ReadQuarantine(const char *archive, CByteBuffer &buf)
+{
+    buf.Free();
+    const ssize_t size = getxattr(archive, "com.apple.quarantine", NULL, 0, 0, 0);
+    if (size <= 0 || size > 4096)
+        return;
+    buf.Alloc((size_t)size);
+    if (getxattr(archive, "com.apple.quarantine", buf, (size_t)size, 0, 0) != size)
+        buf.Free();
 }
 
 static int32_t RunExtract(bool test, const char *archive, const char *destination,
@@ -397,7 +413,10 @@ static int32_t RunExtract(bool test, const char *archive, const char *destinatio
         if (hr != S_OK || !outcome.FirstError.empty() || outcome.Cancelled)
             return Resolve(hr, outcome, password != NULL, errorText);
     }
-    const HRESULT hr = ExtractWith(reporter, test, source, target, items, itemCount, overwrite, password, errorText);
+    CByteBuffer quarantine;
+    ReadQuarantine(archive, quarantine);
+    const HRESULT hr = ExtractWith(reporter, test, source, target, items, itemCount, overwrite, password, quarantine,
+                                   errorText);
     return Resolve(hr, outcome, password != NULL, errorText);
 }
 

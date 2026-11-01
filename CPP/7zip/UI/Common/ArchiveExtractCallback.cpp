@@ -1,4 +1,8 @@
 // ArchiveExtractCallback.cpp
+// Changed by ARAS-Workspace (https://github.com/ARAS-Workspace/7zip-lib) from 7-Zip 26.05:
+//   2026-11-01: On Apple systems, each folder, file and link an extraction makes takes the
+//               archive's com.apple.quarantine (QuarantineBuf) as it is made, before any
+//               data is written; a read-only file is made writable for it, then given its mode.
 
 #include "StdAfx.h"
 
@@ -37,6 +41,10 @@
 #include "../Common/PropIDUtils.h"
 
 #include "ArchiveExtractCallback.h"
+
+#ifdef __APPLE__
+#include <sys/xattr.h>
+#endif
 
 using namespace NWindows;
 using namespace NFile;
@@ -311,6 +319,14 @@ CArchiveExtractCallback::CArchiveExtractCallback():
 }
 
 
+#ifdef __APPLE__
+void CArchiveExtractCallback::SetQuarantine(CFSTR path) const
+{
+  if (QuarantineBuf.Size() != 0)
+    setxattr(path, "com.apple.quarantine", QuarantineBuf, QuarantineBuf.Size(), 0, XATTR_NOFOLLOW);
+}
+#endif
+
 void CArchiveExtractCallback::InitBeforeNewArchive()
 {
 #if defined(_WIN32) && !defined(UNDER_CE) && !defined(Z7_SFX)
@@ -527,6 +543,9 @@ void CArchiveExtractCallback::CreateComplexDirectory(
       // printf("\n mkdir mode = %o\n", (unsigned)mode);
       if (mkdir(fullPath, mode) == 0)
       {
+#ifdef __APPLE__
+        SetQuarantine(fullPath);
+#endif
         if (isFinalDir)
           _dirAttrib_wasSet = true;
         // printf("\n mkdir OK\n");
@@ -1536,6 +1555,9 @@ HRESULT CArchiveExtractCallback::GetExtractStream(CMyComPtr<ISequentialOutStream
   CMyComPtr<IOutStream> outFileStream_Loc(_outFileStreamSpec);
 
   bool needSetAttrib = true;
+#ifdef __APPLE__
+  _quarantine_FinalMode = 0;
+#endif
 #ifndef _WIN32
   if (_fi.Attrib_Defined)
   {
@@ -1567,6 +1589,14 @@ HRESULT CArchiveExtractCallback::GetExtractStream(CMyComPtr<ISequentialOutStream
        mode &= g_umask.mask;
        // mode = 0777; // for debug
        // mode |= S_ISUID | S_ISGID | S_ISVTX; // for debug
+#ifdef __APPLE__
+      // a file nobody may write takes no quarantine: it is made writable for it, then given its mode
+      if (QuarantineBuf.Size() != 0 && (mode & S_IWUSR) == 0)
+      {
+        _quarantine_FinalMode = (UInt32)mode;
+        mode |= S_IWUSR;
+      }
+#endif
       _outFileStreamSpec->File.mode_for_Create = mode;
     }
     needSetAttrib = false;
@@ -1582,6 +1612,11 @@ HRESULT CArchiveExtractCallback::GetExtractStream(CMyComPtr<ISequentialOutStream
       return S_OK;
     }
   }
+#ifdef __APPLE__
+  SetQuarantine(fullProcessedPath);
+  if (_quarantine_FinalMode != 0)
+    chmod(fullProcessedPath, (mode_t)_quarantine_FinalMode);
+#endif
   
   SET_NEED_SET_OWNER
   _needSetAttrib = needSetAttrib;
@@ -2478,6 +2513,9 @@ static HRESULT SetLink2(const CArchiveExtractCallback &callback,
   {
     return callback.SendMessageError_with_LastError(kCantCreateSymLink, fullProcessedPath_from);
   }
+#ifdef __APPLE__
+  callback.SetQuarantine(fullProcessedPath_from);
+#endif
   linkWasSet = true;
   return S_OK;
 }
